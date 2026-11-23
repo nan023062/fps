@@ -31,28 +31,270 @@ interface CharacterPalette {
 
 const paletteCache = new Map<string, CharacterPalette>();
 
+/**
+ * 程序化表面纹理：用 DataTexture 生成，不依赖 DOM（Node 里的 vitest 也能构建角色），
+ * 同一贴图在浏览器与测试环境中完全一致。
+ *
+ * 纹理只走 uv 通道：toSkinnedGeometry 合并时只保留 position/normal/uv，
+ * 因此 map / roughnessMap / bumpMap 都能安全保留，而 normalMap（需要 tangent）不使用。
+ * 贴图按「种类 + 平铺次数 + 用途」缓存，跨角色共享，不随单个模型 dispose 释放。
+ */
+type SurfaceKind = 'weave' | 'leather' | 'rubber' | 'brushed' | 'paint' | 'skin' | 'glass';
+
+const surfaceTextureCache = new Map<string, THREE.DataTexture>();
+
+function hashSeed(text: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+function noiseField(rand: () => number, cells: number): Float32Array {
+  const grid = new Float32Array(cells * cells);
+  for (let i = 0; i < grid.length; i += 1) grid[i] = rand();
+  return grid;
+}
+
+/** 双线性 + smoothstep 插值的值噪声，用于织物/皮革的低频起伏。 */
+function sampleField(grid: Float32Array, cells: number, u: number, v: number): number {
+  const x = u * cells;
+  const y = v * cells;
+  const xf = Math.floor(x);
+  const yf = Math.floor(y);
+  const x0 = ((xf % cells) + cells) % cells;
+  const y0 = ((yf % cells) + cells) % cells;
+  const x1 = (x0 + 1) % cells;
+  const y1 = (y0 + 1) % cells;
+  const fx = x - xf;
+  const fy = y - yf;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const top = grid[y0 * cells + x0] + (grid[y0 * cells + x1] - grid[y0 * cells + x0]) * sx;
+  const bottom = grid[y1 * cells + x0] + (grid[y1 * cells + x1] - grid[y1 * cells + x0]) * sx;
+  return top + (bottom - top) * sy;
+}
+
+/**
+ * 生成表面贴图。
+ * - detail：线性数据，同时作为 roughnessMap 与 bumpMap（划痕处更光滑、更凹）。
+ * - color：sRGB，作为 map 与材质颜色相乘，制造轻微明暗/磨损差异。
+ */
+function surfaceTexture(
+  kind: SurfaceKind,
+  repeat: number,
+  mode: 'detail' | 'color',
+  size = 128,
+): THREE.DataTexture {
+  const key = `${mode}:${kind}:${repeat}:${size}`;
+  const cached = surfaceTextureCache.get(key);
+  if (cached) return cached;
+
+  const rand = seededRandom(hashSeed(key));
+  const coarse = noiseField(rand, 8);
+  const fine = noiseField(rand, 32);
+  const data = new Uint8Array(size * size * 4);
+
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const u = x / size;
+      const v = y / size;
+      const low = sampleField(coarse, 8, u, v);
+      const high = sampleField(fine, 32, u, v);
+      let value: number;
+      if (mode === 'color') {
+        // 颜色贴图围绕白色做小幅乘性差异；木质/涂装对比更强。
+        const contrast =
+          kind === 'paint' ? 0.16 : kind === 'leather' ? 0.14 : kind === 'weave' ? 0.09 : 0.06;
+        value = 1 - contrast * (low * 0.6 + high * 0.4);
+        if (kind === 'brushed') value -= 0.05 * Math.abs(Math.sin(v * Math.PI * 18));
+      } else {
+        // 细节贴图：0.6–1.0 的粗糙度/凹凸，划痕在下方叠加。
+        switch (kind) {
+          case 'weave': {
+            const weave = Math.sin(u * Math.PI * 2 * 12) * Math.sin(v * Math.PI * 2 * 12);
+            value = 0.82 + weave * 0.05 + (high - 0.5) * 0.12;
+            break;
+          }
+          case 'brushed': {
+            const streak = sampleField(fine, 32, u, v * 0.22);
+            value = 0.7 + streak * 0.26 + (low - 0.5) * 0.05;
+            break;
+          }
+          case 'leather':
+            value = 0.76 + low * 0.14 + (high - 0.5) * 0.2;
+            break;
+          case 'rubber':
+            value = 0.84 + (high - 0.5) * 0.2;
+            break;
+          case 'paint':
+            value = 0.78 + low * 0.16 + (high - 0.5) * 0.12;
+            break;
+          case 'skin':
+            value = 0.83 + low * 0.08 + (high - 0.5) * 0.1;
+            break;
+          default:
+            value = 0.9 + (high - 0.5) * 0.08;
+            break;
+        }
+      }
+      const channel = Math.round(Math.max(0, Math.min(1, value)) * 255);
+      const index = (y * size + x) * 4;
+      data[index] = channel;
+      data[index + 1] = channel;
+      data[index + 2] = channel;
+      data[index + 3] = 255;
+    }
+  }
+
+  // 划痕：金属/涂装最明显，织物与皮革只有少量磨白。
+  const scratchCount =
+    kind === 'brushed' || kind === 'paint' ? 24 : kind === 'leather' ? 10 : kind === 'glass' ? 6 : 4;
+  const scratchScale = mode === 'color' ? 0.5 : 1;
+  for (let s = 0; s < scratchCount; s += 1) {
+    let px = Math.floor(rand() * size);
+    let py = Math.floor(rand() * size);
+    const length = 4 + Math.floor(rand() * (kind === 'brushed' ? 30 : 16));
+    const horizontal = kind === 'brushed' ? rand() < 0.8 : rand() < 0.5;
+    const delta = (rand() < 0.5 ? -1 : 1) * (0.05 + rand() * 0.14) * scratchScale;
+    for (let step = 0; step < length; step += 1) {
+      const index = (py * size + px) * 4;
+      const next = Math.max(0, Math.min(1, data[index] / 255 + delta));
+      data[index] = Math.round(next * 255);
+      data[index + 1] = data[index];
+      data[index + 2] = data[index];
+      if (horizontal) px = (px + 1) % size;
+      else py = (py + 1) % size;
+    }
+  }
+
+  const texture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+  texture.name = key;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(repeat, repeat);
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearMipmapLinearFilter;
+  texture.generateMipmaps = true;
+  texture.anisotropy = 4;
+  // 细节贴图是线性数据，颜色贴图按 sRGB 采样。
+  texture.colorSpace = mode === 'color' ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  texture.needsUpdate = true;
+  surfaceTextureCache.set(key, texture);
+  return texture;
+}
+
+/** 给材质挂上程序化贴图：色彩微差（map）+ 粗糙度（roughnessMap）+ 微凹凸（bumpMap）。 */
+function textured(
+  material: THREE.MeshStandardMaterial,
+  kind: SurfaceKind,
+  repeat: number,
+  options: { color?: boolean; bump?: number } = {},
+): void {
+  const detail = surfaceTexture(kind, repeat, 'detail');
+  material.roughnessMap = detail;
+  if (options.color !== false) material.map = surfaceTexture(kind, repeat, 'color');
+  if (options.bump !== undefined) {
+    material.bumpMap = detail;
+    material.bumpScale = options.bump;
+  }
+  material.needsUpdate = true;
+}
+
 function palette(team: CharacterTeam, accentColor: number): CharacterPalette {
   const key = `${team}:${accentColor}`;
   const cached = paletteCache.get(key);
   if (cached) return cached;
   const fabricColor = team === 'ct' ? 0x3c4854 : 0x6a5a41;
   const plateColor = team === 'ct' ? 0x59636d : 0x7f6c4d;
+
+  const fabric = new THREE.MeshStandardMaterial({
+    color: fabricColor,
+    roughness: 0.95,
+    metalness: 0.02,
+  });
+  textured(fabric, 'weave', 4, { bump: 0.005 });
+
+  const plate = new THREE.MeshStandardMaterial({
+    color: plateColor,
+    roughness: 0.66,
+    metalness: 0.2,
+  });
+  textured(plate, 'brushed', 3, { bump: 0.003 });
+
+  const strap = new THREE.MeshStandardMaterial({
+    color: 0x2c2d2c,
+    roughness: 0.94,
+    metalness: 0.06,
+  });
+  textured(strap, 'leather', 4, { bump: 0.004 });
+
+  const accent = new THREE.MeshStandardMaterial({
+    color: accentColor,
+    roughness: 0.7,
+    metalness: 0.14,
+  });
+  textured(accent, 'paint', 3, { bump: 0.002 });
+
+  const skin = new THREE.MeshStandardMaterial({
+    color: team === 'ct' ? 0xc7a17b : 0xb08a63,
+    roughness: 0.8,
+    metalness: 0.0,
+  });
+  textured(skin, 'skin', 2, { bump: 0.0012 });
+
+  const glove = new THREE.MeshStandardMaterial({
+    color: 0x33352f,
+    roughness: 0.93,
+    metalness: 0.05,
+  });
+  textured(glove, 'leather', 5, { bump: 0.004 });
+
+  const boot = new THREE.MeshStandardMaterial({
+    color: 0x2a2926,
+    roughness: 0.96,
+    metalness: 0.04,
+  });
+  textured(boot, 'leather', 5, { bump: 0.005 });
+
+  const visor = new THREE.MeshPhysicalMaterial({
+    color: 0x1c2a30,
+    roughness: 0.14,
+    metalness: 0.55,
+    clearcoat: 1,
+    clearcoatRoughness: 0.08,
+  });
+  // 面罩只加粗糙度细节（细微擦痕），保留镜面反射与 clearcoat 的干净观感。
+  visor.roughnessMap = surfaceTexture('glass', 3, 'detail');
+  visor.needsUpdate = true;
+
+  const metal = new THREE.MeshStandardMaterial({
+    color: 0x4a4f55,
+    roughness: 0.5,
+    metalness: 0.78,
+  });
+  textured(metal, 'brushed', 3, { bump: 0.002 });
+
   const paletteValue: CharacterPalette = {
-    fabric: new THREE.MeshStandardMaterial({ color: fabricColor, roughness: 0.9, metalness: 0.03 }),
-    plate: new THREE.MeshStandardMaterial({ color: plateColor, roughness: 0.62, metalness: 0.18 }),
-    strap: new THREE.MeshStandardMaterial({ color: 0x2c2d2c, roughness: 0.86, metalness: 0.08 }),
-    accent: new THREE.MeshStandardMaterial({ color: accentColor, roughness: 0.7, metalness: 0.12 }),
-    skin: new THREE.MeshStandardMaterial({ color: team === 'ct' ? 0xc7a17b : 0xb08a63, roughness: 0.78 }),
-    glove: new THREE.MeshStandardMaterial({ color: 0x33352f, roughness: 0.88, metalness: 0.06 }),
-    boot: new THREE.MeshStandardMaterial({ color: 0x2a2926, roughness: 0.92, metalness: 0.05 }),
-    visor: new THREE.MeshPhysicalMaterial({
-      color: 0x1c2a30,
-      roughness: 0.12,
-      metalness: 0.55,
-      clearcoat: 1,
-      clearcoatRoughness: 0.08,
-    }),
-    metal: new THREE.MeshStandardMaterial({ color: 0x4a4f55, roughness: 0.45, metalness: 0.7 }),
+    fabric,
+    plate,
+    strap,
+    accent,
+    skin,
+    glove,
+    boot,
+    visor,
+    metal,
   };
   paletteCache.set(key, paletteValue);
   return paletteValue;
@@ -161,12 +403,12 @@ function characterParts(colors: CharacterPalette, variant: number): BoundPart[] 
   // ── 胸部：护板、弹匣包、背包、天线、领口 ────────────────
   parts.push(bound('chest', part(roundedBox(0.41, 0.3, chestDepth, 0.06, 2), colors.fabric, v(0, 1.34, 0))));
   parts.push(bound('chest', part(
-    roundedBox(0.3, 0.27, 0.06, 0.02, 2),
+    roundedBox(0.3, 0.27, 0.06, 0.02, 3),
     colors.plate,
     v(0, 1.33, -chestDepth * 0.5 - 0.005),
   )));
   parts.push(bound('chest', part(
-    roundedBox(0.3, 0.26, 0.05, 0.02, 1),
+    roundedBox(0.3, 0.26, 0.05, 0.02, 2),
     colors.plate,
     v(0, 1.34, chestDepth * 0.5 + 0.01),
   )));
@@ -194,13 +436,13 @@ function characterParts(colors: CharacterPalette, variant: number): BoundPart[] 
     2,
     6,
   )));
-  parts.push(bound('chest', part(new THREE.CylinderGeometry(0.055, 0.06, 0.09, 10), colors.skin, v(0, 1.5, 0))));
+  parts.push(bound('chest', part(new THREE.CylinderGeometry(0.055, 0.06, 0.09, 20), colors.skin, v(0, 1.5, 0))));
   parts.push(bound('chest', part(roundedBox(0.2, 0.05, 0.19, 0.02, 1), colors.strap, v(0, 1.5, -0.01))));
 
   // ── 头部：面罩与头盔 ────────────────────────────────────
-  parts.push(bound('head', part(roundedBox(0.19, 0.22, 0.2, 0.06, 2), colors.skin, v(0, 1.63, -0.005))));
+  parts.push(bound('head', part(roundedBox(0.19, 0.22, 0.2, 0.06, 3), colors.skin, v(0, 1.63, -0.005))));
   parts.push(bound('head', part(roundedBox(0.17, 0.07, 0.03, 0.012, 1), colors.visor, v(0, 1.65, -0.11))));
-  const shellGeo = new THREE.SphereGeometry(0.125, 20, 12, 0, Math.PI * 2, 0, Math.PI * 0.58);
+  const shellGeo = new THREE.SphereGeometry(0.125, 28, 18, 0, Math.PI * 2, 0, Math.PI * 0.58);
   parts.push(bound('head', part(shellGeo, colors.plate, v(0, 1.65, 0), undefined, v(1.05, 0.95, 1.12))));
   parts.push(bound('head', part(roundedBox(0.23, 0.035, 0.25, 0.015, 1), colors.plate, v(0, 1.67, -0.01))));
   for (const side of [-1, 1]) {
@@ -222,9 +464,9 @@ function characterParts(colors: CharacterPalette, variant: number): BoundPart[] 
       colors.accent,
       v(x + side * 0.082, 1.42, 0),
     )));
-    parts.push(bound(arm, capsuleBetween(v(x, 1.4, 0), v(x, 1.16, 0), 0.058, colors.fabric)));
+    parts.push(bound(arm, capsuleBetween(v(x, 1.4, 0), v(x, 1.16, 0), 0.058, colors.fabric, 5, 14)));
     parts.push(bound(fore, part(roundedBox(0.05, 0.06, 0.11, 0.02, 1), colors.plate, v(x, 1.13, -0.03))));
-    parts.push(bound(fore, capsuleBetween(v(x, 1.14, 0), v(x, 0.92, 0), 0.05, colors.fabric)));
+    parts.push(bound(fore, capsuleBetween(v(x, 1.14, 0), v(x, 0.92, 0), 0.05, colors.fabric, 5, 14)));
     parts.push(bound(hand, part(roundedBox(0.075, 0.085, 0.11, 0.03, 2), colors.glove, v(x, 0.895, -0.01))));
   }
 
@@ -234,10 +476,10 @@ function characterParts(colors: CharacterPalette, variant: number): BoundPart[] 
     const thigh: HumanJoint = side < 0 ? 'upperLegL' : 'upperLegR';
     const shin: HumanJoint = side < 0 ? 'lowerLegL' : 'lowerLegR';
     const foot: HumanJoint = side < 0 ? 'footL' : 'footR';
-    parts.push(bound(thigh, capsuleBetween(v(x, 0.9, 0), v(x, 0.55, 0), 0.077, colors.fabric)));
+    parts.push(bound(thigh, capsuleBetween(v(x, 0.9, 0), v(x, 0.55, 0), 0.077, colors.fabric, 5, 14)));
     parts.push(bound(thigh, part(roundedBox(0.11, 0.1, 0.16, 0.03, 2), colors.strap, v(x, 0.78, 0.03))));
     parts.push(bound(shin, part(roundedBox(0.13, 0.13, 0.11, 0.03, 2), colors.plate, v(x, 0.51, -0.055))));
-    parts.push(bound(shin, capsuleBetween(v(x, 0.5, 0), v(x, 0.16, 0), 0.06, colors.fabric)));
+    parts.push(bound(shin, capsuleBetween(v(x, 0.5, 0), v(x, 0.16, 0), 0.06, colors.fabric, 5, 14)));
     parts.push(bound(foot, part(roundedBox(0.14, 0.12, 0.27, 0.035, 2), colors.boot, v(x, 0.06, -0.02))));
   }
 

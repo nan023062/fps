@@ -5,13 +5,17 @@ import { boxCenter, boxSize } from './level';
 import type { MaterialLibrary } from './materials';
 import type { QualityPreset } from './quality';
 import {
+  cylinderSegmentsFor,
   hashNoise,
   instanced,
   matrixAt,
   mergeStaticMeshes,
   meshAt,
   offsetMesh,
+  polyhedronDetailFor,
   roundedBox,
+  roundedSegmentsFor,
+  sphereSegmentsFor,
   texturisedBox,
 } from './geometry';
 
@@ -96,7 +100,7 @@ function buildGround(box: LevelBox, ctx: BuildContext): void {
 
   // 地面细节：碎石与干裂纹理用少量薄片表现，全部贴地不参与碰撞。
   if (ctx.quality.detailScale < 0.7) return;
-  const pebbleGeo = roundedBox(0.22, 0.07, 0.16, 0.03, 1);
+  const pebbleGeo = roundedBox(0.22, 0.07, 0.16, 0.03, roundedSegmentsFor(ctx.quality));
   const pebbleMat = ctx.materials.detail(0x9d8a68, 0.95, 0.02, 'concrete');
   const pebbles: THREE.Matrix4[] = [];
   const count = Math.round(70 * ctx.quality.detailScale);
@@ -113,7 +117,7 @@ function buildWall(box: LevelBox, ctx: BuildContext): void {
   const size = boxSize(box);
   const material = ctx.materials.surface(box.kind, box.tone);
   const radius = Math.min(0.07, Math.min(size.x, size.y, size.z) * 0.25);
-  const geometry = roundedBox(size.x, size.y, size.z, radius, 2);
+  const geometry = roundedBox(size.x, size.y, size.z, radius, roundedSegmentsFor(ctx.quality));
   scaleRoundedUvs(geometry, size, ctx.materials.tileSize(ctx.materials.patternOf(box.kind)));
   ctx.root.add(meshAt(geometry, material, vec3(0, 0, 0)));
   ctx.meshes += 1;
@@ -165,7 +169,7 @@ function buildBlock(box: LevelBox, ctx: BuildContext): void {
   const size = boxSize(box);
   const material = ctx.materials.surface(box.kind, box.tone);
   const radius = Math.min(0.06, Math.min(size.x, size.y, size.z) * 0.3);
-  const geometry = roundedBox(size.x, size.y, size.z, radius, 2);
+  const geometry = roundedBox(size.x, size.y, size.z, radius, roundedSegmentsFor(ctx.quality));
   scaleRoundedUvs(geometry, size, ctx.materials.tileSize(ctx.materials.patternOf(box.kind)));
   ctx.root.add(meshAt(geometry, material, vec3(0, 0, 0)));
   ctx.meshes += 1;
@@ -207,7 +211,7 @@ function buildCrate(box: LevelBox, ctx: BuildContext): void {
     bodyY,
     bodyZ,
     Math.min(0.05, Math.min(bodyX, bodyY, bodyZ) * 0.2),
-    2,
+    roundedSegmentsFor(ctx.quality),
   );
   scaleRoundedUvs(
     geometry,
@@ -252,7 +256,7 @@ function buildCrate(box: LevelBox, ctx: BuildContext): void {
 
 function buildSandbag(box: LevelBox, ctx: BuildContext): void {
   const size = boxSize(box);
-  const bagGeo = roundedBox(0.5, 0.24, 0.42, 0.11, 2);
+  const bagGeo = roundedBox(0.5, 0.24, 0.42, 0.11, roundedSegmentsFor(ctx.quality));
   const material = ctx.materials.surface(box.kind, box.tone);
   const rows = Math.max(1, Math.round(size.y / 0.26));
   const cols = Math.max(1, Math.round(size.x / 0.5));
@@ -313,7 +317,7 @@ function buildFence(box: LevelBox, ctx: BuildContext): void {
       ),
     );
   }
-  const postGeo = roundedBox(0.09, 1.1, 0.09, 0.02, 1);
+  const postGeo = roundedBox(0.09, 1.1, 0.09, 0.02, roundedSegmentsFor(ctx.quality));
   ctx.root.add(instanced(postGeo, postMat, posts, true));
   ctx.meshes += 1;
 
@@ -363,22 +367,34 @@ function buildPillar(box: LevelBox, ctx: BuildContext): void {
   const radius = Math.min(size.x, size.z) * 0.46;
   const material = ctx.materials.surface(box.kind, box.tone);
   const shaftHeight = size.y * 0.84;
-  const shaft = new THREE.CylinderGeometry(radius, radius * 1.03, shaftHeight, 14, 1);
+  const shaft = new THREE.CylinderGeometry(
+    radius,
+    radius * 1.03,
+    shaftHeight,
+    cylinderSegmentsFor(ctx.quality),
+    1,
+  );
   ctx.root.add(meshAt(shaft, material, vec3(0, 0, 0)));
   ctx.meshes += 1;
 
   const trim = ctx.materials.surface(box.kind, (box.tone ?? 1) * 1.16);
   const baseHeight = (size.y - shaftHeight) * 0.55;
-  const base = roundedBox(size.x * 0.98, baseHeight, size.z * 0.98, 0.04, 1);
+  const base = roundedBox(size.x * 0.98, baseHeight, size.z * 0.98, 0.04, roundedSegmentsFor(ctx.quality));
   ctx.root.add(offsetMesh(base, trim, ctx.root, 0, -size.y * 0.5 + baseHeight * 0.5, 0));
   ctx.meshes += 1;
 
-  const cap = roundedBox(size.x * 0.99, baseHeight, size.z * 0.99, 0.04, 1);
+  const cap = roundedBox(size.x * 0.99, baseHeight, size.z * 0.99, 0.04, roundedSegmentsFor(ctx.quality));
   ctx.root.add(offsetMesh(cap, trim, ctx.root, 0, size.y * 0.5 - baseHeight * 0.5, 0));
   ctx.meshes += 1;
 
   if (ctx.quality.detailScale < 0.7) return;
-  const ring = new THREE.CylinderGeometry(radius * 1.08, radius * 1.08, 0.12, 14, 1);
+  const ring = new THREE.CylinderGeometry(
+    radius * 1.08,
+    radius * 1.08,
+    0.12,
+    cylinderSegmentsFor(ctx.quality),
+    1,
+  );
   const ringMat = ctx.materials.surface(box.kind, (box.tone ?? 1) * 0.8);
   ctx.root.add(offsetMesh(ring, ringMat, ctx.root, 0, size.y * 0.16, 0, false));
   ctx.root.add(offsetMesh(ring, ringMat, ctx.root, 0, -size.y * 0.2, 0, false));
@@ -388,7 +404,13 @@ function buildPillar(box: LevelBox, ctx: BuildContext): void {
 function buildLintel(box: LevelBox, ctx: BuildContext): void {
   const size = boxSize(box);
   const material = ctx.materials.surface(box.kind, box.tone);
-  const geometry = roundedBox(size.x, size.y, size.z, Math.min(0.06, size.y * 0.3), 2);
+  const geometry = roundedBox(
+    size.x,
+    size.y,
+    size.z,
+    Math.min(0.06, size.y * 0.3),
+    roundedSegmentsFor(ctx.quality),
+  );
   scaleRoundedUvs(geometry, size, ctx.materials.tileSize(ctx.materials.patternOf(box.kind)));
   ctx.root.add(meshAt(geometry, material, vec3(0, 0, 0)));
   ctx.meshes += 1;
@@ -403,15 +425,32 @@ function buildWreck(box: LevelBox, ctx: BuildContext): void {
   const size = boxSize(box);
   const metal = ctx.materials.detail(0x6b6055, 0.85, 0.45, 'metal');
   const rust = ctx.materials.detail(0x8a5a35, 0.95, 0.2, 'concrete');
-  const hull = roundedBox(size.x * 0.9, size.y * 0.62, size.z * 0.9, 0.08, 2);
+  const hull = roundedBox(
+    size.x * 0.9,
+    size.y * 0.62,
+    size.z * 0.9,
+    0.08,
+    roundedSegmentsFor(ctx.quality),
+  );
   ctx.root.add(offsetMesh(hull, metal, ctx.root, 0, -size.y * 0.08, 0));
   ctx.meshes += 1;
 
-  const cabin = roundedBox(size.x * 0.42, size.y * 0.34, size.z * 0.7, 0.05, 2);
+  const cabin = roundedBox(
+    size.x * 0.42,
+    size.y * 0.34,
+    size.z * 0.7,
+    0.05,
+    roundedSegmentsFor(ctx.quality),
+  );
   ctx.root.add(offsetMesh(cabin, rust, ctx.root, size.x * 0.12, size.y * 0.22, -size.z * 0.04));
   ctx.meshes += 1;
 
-  const wheelGeo = new THREE.CylinderGeometry(size.y * 0.22, size.y * 0.22, 0.22, 12);
+  const wheelGeo = new THREE.CylinderGeometry(
+    size.y * 0.22,
+    size.y * 0.22,
+    0.22,
+    cylinderSegmentsFor(ctx.quality),
+  );
   wheelGeo.rotateZ(Math.PI * 0.5);
   const rubber = ctx.materials.detail(0x23242a, 0.95, 0.05);
   for (const sx of [-1, 1]) {
@@ -504,7 +543,16 @@ function buildHorizon(
 
   const duneCount = Math.round(level.decor.dunes * Math.min(1, quality.detailScale + 0.2));
   if (duneCount > 0) {
-    const duneGeo = new THREE.SphereGeometry(1, 16, 8, 0, Math.PI * 2, 0, Math.PI * 0.5);
+    const duneSegments = sphereSegmentsFor(quality);
+    const duneGeo = new THREE.SphereGeometry(
+      1,
+      duneSegments.widthSegments,
+      duneSegments.heightSegments,
+      0,
+      Math.PI * 2,
+      0,
+      Math.PI * 0.5,
+    );
     const duneMat = materials.detail(theme.horizon.dune, 1, 0, 'sand');
     const matrices: THREE.Matrix4[] = [];
     // 沙丘必须完全落在场地外：中心距 = 场地半长 * 1.5 + 沙丘自身半径。
@@ -536,7 +584,7 @@ function buildHorizon(
   const mesaCount = Math.round(level.decor.mesas * Math.min(1, quality.detailScale + 0.2));
   if (mesaCount > 0) {
     const mesas: THREE.Matrix4[] = [];
-    const rockGeo = new THREE.DodecahedronGeometry(1, 0);
+    const rockGeo = new THREE.DodecahedronGeometry(1, polyhedronDetailFor(quality));
     const rockMat = materials.detail(theme.horizon.ridge, 0.95, 0, 'stone');
     for (let i = 0; i < mesaCount; i += 1) {
       const angle = (i / mesaCount) * Math.PI * 2 + random() * 0.7;
@@ -565,7 +613,19 @@ function buildHorizon(
       depthWrite: false,
       fog: false,
     });
-    const ridge = new THREE.Mesh(new THREE.SphereGeometry(520, 24, 12, 0, Math.PI * 2, 0, Math.PI * 0.32), ridgeMat);
+    const ridgeSegments = sphereSegmentsFor(quality);
+    const ridge = new THREE.Mesh(
+      new THREE.SphereGeometry(
+        520,
+        ridgeSegments.widthSegments,
+        ridgeSegments.heightSegments,
+        0,
+        Math.PI * 2,
+        0,
+        Math.PI * 0.32,
+      ),
+      ridgeMat,
+    );
     ridge.position.y = -30;
     owned.push(ridgeMat);
     group.add(ridge);

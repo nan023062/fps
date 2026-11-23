@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { textureSizeFor } from './geometry';
 import type { LevelTheme, SurfaceKind, SurfacePattern, SurfaceStyle } from './level';
 
 /**
@@ -222,11 +223,26 @@ export class MaterialLibrary {
   private readonly textures = new Map<SurfacePattern, PatternTextures>();
   private readonly surfaces = new Map<string, THREE.MeshStandardMaterial>();
   private readonly plain = new Map<string, THREE.MeshStandardMaterial>();
+  /** 程序化 Canvas 纹理边长：高档 512，中低档 256（按 meshDetail 联动）。 */
+  private readonly textureSize: number;
 
   constructor(
     private readonly theme: LevelTheme,
     private anisotropy = 4,
-  ) {}
+    meshDetail?: number,
+  ) {
+    // Arena 会直接传 preset.meshDetail；只传 anisotropy 的调用方按各向异性过滤档位
+    // （1/4/8）推算，与 QualityPreset 的低/中/高一一对应，纹理尺寸仍然正确。
+    const detail =
+      typeof meshDetail === 'number'
+        ? meshDetail
+        : anisotropy >= 8
+          ? 3
+          : anisotropy >= 4
+            ? 2
+            : 1;
+    this.textureSize = textureSizeFor(detail);
+  }
 
   /** 画质切换时更新各向异性过滤；贴图是共享的，只改参数 + 重新上传。 */
   setAnisotropy(value: number): void {
@@ -320,7 +336,7 @@ export class MaterialLibrary {
       return empty;
     }
     const spec = PATTERNS[pattern];
-    const size = 256;
+    const size = this.textureSize;
     const colorCanvas = makeCanvas(size);
     const detailCanvas = makeCanvas(size);
     if (!colorCanvas || !detailCanvas) {

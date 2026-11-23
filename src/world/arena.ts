@@ -94,7 +94,11 @@ export class Arena {
     this.sky = createSkySystem(this.renderer, level.lighting);
     this.scene.add(this.sky.sky);
 
-    this.materials = new MaterialLibrary(level.theme, this.preset.anisotropy);
+    this.materials = new MaterialLibrary(
+      level.theme,
+      this.preset.anisotropy,
+      this.preset.meshDetail,
+    );
     this.model = buildLevel(level, this.materials, this.preset);
     this.scene.add(this.model.root);
 

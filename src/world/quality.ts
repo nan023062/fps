@@ -28,6 +28,12 @@ export interface QualityPreset {
   /** 程序化细节密度（装饰网格数量倍率）。 */
   detailScale: number;
   dustMotes: number;
+  /**
+   * 程序化网格细分档位：1=低、2=中、3=高，单调递增。
+   * 只影响几何段数（三角面密度），不改变零件数量；由 geometry 的
+   * roundedSegmentsFor / capsuleSegmentsFor / cylinderSegmentsFor / sphereSegmentsFor 解析。
+   */
+  meshDetail: number;
 }
 
 export const QUALITY_PRESETS: Record<QualityLevel, QualityPreset> = {
@@ -49,6 +55,7 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualityPreset> = {
     grading: false,
     detailScale: 0.45,
     dustMotes: 0,
+    meshDetail: 1,
   },
   medium: {
     id: 'medium',
@@ -68,6 +75,7 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualityPreset> = {
     grading: true,
     detailScale: 0.8,
     dustMotes: 70,
+    meshDetail: 2,
   },
   high: {
     id: 'high',
@@ -87,6 +95,7 @@ export const QUALITY_PRESETS: Record<QualityLevel, QualityPreset> = {
     grading: true,
     detailScale: 1,
     dustMotes: 160,
+    meshDetail: 3,
   },
 };
 

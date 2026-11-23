@@ -2,9 +2,79 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { Vec3 } from '../core/math';
+import type { QualityPreset } from './quality';
 
 /** 程序化几何工具：倒角盒、按米缩放的 UV、实例化重复件。 */
 
+/** 没有显式画质信息时按高档细分（与默认画质一致）。 */
+export const DEFAULT_MESH_DETAIL = 3;
+
+type QualityLike = QualityPreset | number | null | undefined;
+
+/**
+ * 从画质档位解析网格细分档位（1=低、2=中、3=高）。
+ * 也可直接传数值；缺省或非法值回落到高档，保证未提供画质的旧调用拿到最完整的几何。
+ */
+export function meshDetailOf(quality: QualityLike): number {
+  let raw: number | undefined;
+  if (typeof quality === 'number') raw = quality;
+  else if (quality) raw = quality.meshDetail;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return DEFAULT_MESH_DETAIL;
+  return Math.max(1, Math.min(3, Math.round(raw)));
+}
+
+/** roundedBox 的倒角分段：低 1、中 2、高 4。 */
+export function roundedSegmentsFor(quality: QualityLike): number {
+  const detail = meshDetailOf(quality);
+  return detail >= 3 ? 4 : detail === 2 ? 2 : 1;
+}
+
+export interface CapsuleSegments {
+  capSegments: number;
+  radialSegments: number;
+}
+
+/** capsuleBetween 的分段：低 3/8、中 4/10（沿用旧缺省）、高 6/16。 */
+export function capsuleSegmentsFor(quality: QualityLike): CapsuleSegments {
+  const detail = meshDetailOf(quality);
+  if (detail >= 3) return { capSegments: 6, radialSegments: 16 };
+  if (detail === 2) return { capSegments: 4, radialSegments: 10 };
+  return { capSegments: 3, radialSegments: 8 };
+}
+
+/** 圆柱径向段数：低 12、中 16、高 24。 */
+export function cylinderSegmentsFor(quality: QualityLike): number {
+  const detail = meshDetailOf(quality);
+  return detail >= 3 ? 24 : detail === 2 ? 16 : 12;
+}
+
+export interface SphereSegments {
+  widthSegments: number;
+  heightSegments: number;
+}
+
+/** 球面分段：低 16×8、中 20×10、高 24×16。 */
+export function sphereSegmentsFor(quality: QualityLike): SphereSegments {
+  const detail = meshDetailOf(quality);
+  if (detail >= 3) return { widthSegments: 24, heightSegments: 16 };
+  if (detail === 2) return { widthSegments: 20, heightSegments: 10 };
+  return { widthSegments: 16, heightSegments: 8 };
+}
+
+/** 多面体（远景岩块）的细分层级：只有高档增加一层，避免石头变成圆球。 */
+export function polyhedronDetailFor(quality: QualityLike): number {
+  return meshDetailOf(quality) >= 3 ? 1 : 0;
+}
+
+/** 画质联动纹理边长：高档 512，中低档维持 256。 */
+export function textureSizeFor(quality: QualityLike): number {
+  return meshDetailOf(quality) >= 3 ? 512 : 256;
+}
+
+/**
+ * 倒角盒。segments 缺省值沿用旧值 2，保证未传段数的既有调用方行为不变；
+ * 关卡/角色等需要画质联动的调用应传入 roundedSegmentsFor(quality)。
+ */
 export function roundedBox(
   sizeX: number,
   sizeY: number,
@@ -158,7 +228,11 @@ export function part(
   return { geometry, matrix, material };
 }
 
-/** 两点之间的胶囊体，用于四肢与枪管等分段造型。 */
+/**
+ * 两点之间的胶囊体，用于四肢与枪管等分段造型。
+ * 缺省段数沿用旧值（4/10），未传段数的既有调用方（角色、武器）保持原样；
+ * 画质联动请使用 capsuleSegmentsFor(quality)。
+ */
 export function capsuleBetween(
   from: THREE.Vector3,
   to: THREE.Vector3,
